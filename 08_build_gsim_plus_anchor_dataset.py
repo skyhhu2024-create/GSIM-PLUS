@@ -283,39 +283,12 @@ def method_maml_product(anchor_data, validation_set, similarity_df, trained_mode
     return predictions
 
 
-def recursive_predict_with_donor_trend_product(model, anchor_data, target_task_list, val_data):
-    predictions = {}
-    std_series = val_data["std_series_init"].copy()
-    hide_set = {int(i) for i in val_data["hide_indices"]}
-    recursive_depth = 0
-    for idx in val_data["hide_indices"]:
-        idx = int(idx)
-        if idx - 1 in hide_set:
-            recursive_depth += 1
-        else:
-            recursive_depth = 0
-        pred_std = core.predict_donor_trend_std(
-            model,
-            anchor_data,
-            target_task_list,
-            val_data,
-            std_series,
-            idx,
-            recursive_depth=recursive_depth,
-        )
-        pred_orig = float(core.from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
-        if np.isfinite(pred_orig):
-            predictions[(val_data["station_id"], int(idx))] = {"pred": pred_orig}
-            std_series[idx] = pred_std
-    return predictions
-
-
-def recursive_predict_with_maml_donor_trend_product(model, anchor_data, target_task_list, val_data):
+def recursive_predict_with_dtrr_product(model, anchor_data, target_task_list, val_data):
     predictions = {}
     std_series = val_data["std_series_init"].copy()
     for idx in val_data["hide_indices"]:
         idx = int(idx)
-        pred_std = core.predict_donor_trend_std_raw(
+        pred_std = core.predict_dtrr_std_raw(
             model,
             anchor_data,
             target_task_list,
@@ -330,7 +303,7 @@ def recursive_predict_with_maml_donor_trend_product(model, anchor_data, target_t
     return predictions
 
 
-def method_donor_trend_product(anchor_data, validation_set, similarity_df):
+def method_dtrr_product(anchor_data, validation_set, similarity_df):
     target_tasks = defaultdict(list)
     for _, row in similarity_df.iterrows():
         target_tasks[row["target_station"]].append({"anchor": row["anchor_station"], "similarity": row["similarity"]})
@@ -340,31 +313,14 @@ def method_donor_trend_product(anchor_data, validation_set, similarity_df):
         task_list = target_tasks.get(target_id, [])
         if not task_list:
             continue
-        model = core.fit_donor_trend_model(anchor_data, task_list, val_data)
-        predictions.update(recursive_predict_with_donor_trend_product(model, anchor_data, task_list, val_data))
-    return predictions
-
-
-def method_maml_donor_trend_product(anchor_data, validation_set, similarity_df):
-    target_tasks = defaultdict(list)
-    for _, row in similarity_df.iterrows():
-        target_tasks[row["target_station"]].append({"anchor": row["anchor_station"], "similarity": row["similarity"]})
-
-    predictions = {}
-    for target_id, val_data in validation_set.items():
-        task_list = target_tasks.get(target_id, [])
-        if not task_list:
-            continue
-        model = core.fit_donor_trend_model(anchor_data, task_list, val_data)
-        predictions.update(recursive_predict_with_maml_donor_trend_product(model, anchor_data, task_list, val_data))
+        model = core.fit_dtrr_model(anchor_data, task_list, val_data)
+        predictions.update(recursive_predict_with_dtrr_product(model, anchor_data, task_list, val_data))
     return predictions
 
 
 def method_product(anchor_data, validation_set, similarity_df, model_obj, method_name):
-    if method_name in {"DonorTrend", "DonorTrend_Guarded"}:
-        return method_donor_trend_product(anchor_data, validation_set, similarity_df)
-    if method_name in {"MAML_DonorTrend", "MAML_DonorTrend_Guarded"}:
-        return method_maml_donor_trend_product(anchor_data, validation_set, similarity_df)
+    if method_name in {"DTRR", "DTRR_Guarded"}:
+        return method_dtrr_product(anchor_data, validation_set, similarity_df)
     return method_maml_product(
         anchor_data,
         validation_set,
@@ -399,8 +355,8 @@ def fill_anchor_station(station_id, anchor_data, similarity_df, model_obj, metho
     if entry is None:
         return None, {"station_id": station_id, "filled_points": 0, "status": "insufficient_training"}
 
-    effective_method = method_name
-    if method_name == "MAML_DonorTrend_Guarded":
+    effective_method = "DTRR" if method_name == "DTRR_Guarded" else method_name
+    if method_name == "DTRR_Guarded":
         median_flow = station_median_flow(base_data)
         if np.isfinite(median_flow) and median_flow < LOW_FLOW_MEDIAN_THRESHOLD:
             effective_method = "MAML"
@@ -472,11 +428,11 @@ def fill_anchor_station(station_id, anchor_data, similarity_df, model_obj, metho
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Build GSIM-PLUS anchor product with a selected MAML variant.")
+    parser = argparse.ArgumentParser(description="Build GSIM-PLUS anchor product with a selected fill method.")
     parser.add_argument(
         "--method",
-        choices=["MAML", "MAML_Calibrated", "MAML_DonorTrend", "MAML_DonorTrend_Guarded", "DonorTrend"],
-        default="MAML",
+        choices=["MAML", "MAML_Calibrated", "DTRR", "DTRR_Guarded"],
+        default="DTRR_Guarded",
         help="Method used for anchor-station filling.",
     )
     return parser.parse_args()
@@ -485,6 +441,8 @@ def parse_args():
 def anchor_output_dir(method_name):
     if method_name == "MAML":
         return STEP8_DIR
+    if method_name == "DTRR_Guarded":
+        return STEP8_DIR / "DTRR_Guarded_Anchor"
     return STEP8_DIR / method_name
 
 
@@ -514,7 +472,7 @@ def main():
     anchor_data = load_anchor_data(anchor_ids)
     anchor_task_data = load_target_base_data(anchor_ids)
     print("Training reusable models...")
-    train_methods = ["MAML"] if args.method == "MAML_DonorTrend_Guarded" else [args.method]
+    train_methods = ["MAML"] if args.method == "DTRR_Guarded" else [args.method]
     models = train_reusable_models(
         anchor_data,
         anchor_similarity_df,
@@ -573,7 +531,7 @@ def main():
         "n_processed_stations": int(len(summary_df)),
         "n_filled_points": int(total_filled_points),
         "study_period": f"{STUDY_START_YEAR}-{STUDY_END_YEAR}",
-        "production_method": args.method,
+        "production_method": "DTRR + low_flow_guard" if args.method == "DTRR_Guarded" else args.method,
         "station_split_dir": str(anchor_fill_dir),
         "similarity_file": str(anchor_similarity_path),
     }
@@ -586,3 +544,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
