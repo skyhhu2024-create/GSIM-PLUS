@@ -27,17 +27,16 @@ DEFAULT_METHOD_ORDER = [
     "Linear",
     "KNN",
     "MAML",
-    "MAML_DonorTrend",
+    "DTRR",
     "LSTM",
 ]
 EXPERIMENTAL_METHODS = [
     "MAML_Calibrated",
-    "DonorTrend",
     "Baseline_Ours",
 ]
 METHOD_ORDER = DEFAULT_METHOD_ORDER + EXPERIMENTAL_METHODS
 
-FOCUS_METHODS = ["MAML", "MAML_DonorTrend", "RandomForest", "IDW"]
+FOCUS_METHODS = ["MAML", "DTRR", "RandomForest", "IDW"]
 TRAINED_MODEL_METHODS = {
     "RandomForest": "rf",
     "Linear": "linear",
@@ -369,8 +368,6 @@ def run_all_methods(anchor_data, validation_set, similarity_df, models, method_n
             predictions.append(core.method_baseline(anchor_data, validation_set, similarity_df))
         elif method_name == "SeasonalMean":
             predictions.append(core.method_seasonal(anchor_data, validation_set, similarity_df))
-        elif method_name == "DonorTrend":
-            predictions.append(core.method_donor_trend(anchor_data, validation_set, similarity_df))
         elif method_name == "RandomForest":
             predictions.append(core.method_ml(anchor_data, validation_set, "rf", trained_model=models["rf"]))
         elif method_name == "Linear":
@@ -379,8 +376,8 @@ def run_all_methods(anchor_data, validation_set, similarity_df, models, method_n
             predictions.append(core.method_ml(anchor_data, validation_set, "knn", trained_model=models["knn"]))
         elif method_name == "MAML":
             predictions.append(core.method_maml(anchor_data, validation_set, similarity_df, trained_model=models["maml"]))
-        elif method_name == "MAML_DonorTrend":
-            predictions.append(core.method_maml_donor_trend(anchor_data, validation_set, similarity_df))
+        elif method_name == "DTRR":
+            predictions.append(core.method_dtrr(anchor_data, validation_set, similarity_df))
         elif method_name == "MAML_Calibrated":
             predictions.append(core.method_maml_calibrated(anchor_data, validation_set, similarity_df, trained_model=models["maml"]))
         elif method_name == "LSTM":
@@ -442,9 +439,8 @@ def plot_scatter_panel(scenario_outputs, scenario_names, output_file):
     fig, axes = plt.subplots(len(available), len(scenario_names), figsize=(10.5, 10), squeeze=False)
     colors = {
         "SeasonalMean": "#8fb339",
-        "DonorTrend": "#6d597a",
         "MAML": "#c8553d",
-        "MAML_DonorTrend": "#d1495b",
+        "DTRR": "#d1495b",
         "MAML_Calibrated": "#b56576",
         "RandomForest": "#264653",
         "IDW": "#457b9d",
@@ -469,3 +465,4 @@ def plot_scatter_panel(scenario_outputs, scenario_names, output_file):
                 ax.set_xlabel("Observed")
     fig.savefig(output_file)
     plt.close(fig)
+
