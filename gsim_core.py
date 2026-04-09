@@ -502,7 +502,7 @@ def _donor_std_at(anchor_info, year, month, target_flow_mean, target_flow_std):
     return donor_std if np.isfinite(donor_std) else np.nan
 
 
-def build_donor_trend_feature_row(anchor_data, target_task_list, val_data, std_series, idx, top_k=3):
+def build_dtrr_feature_row(anchor_data, target_task_list, val_data, std_series, idx, top_k=3):
     lag1 = std_series[idx - 1] if idx > 0 and np.isfinite(std_series[idx - 1]) else 0.0
     year = int(val_data["year"][idx])
     month = int(val_data["month"][idx])
@@ -551,8 +551,8 @@ def build_donor_trend_feature_row(anchor_data, target_task_list, val_data, std_s
     return feature_row
 
 
-def fallback_donor_trend_std(anchor_data, target_task_list, val_data, std_series, idx):
-    feature_row = build_donor_trend_feature_row(anchor_data, target_task_list, val_data, std_series, idx)
+def fallback_dtrr_std(anchor_data, target_task_list, val_data, std_series, idx):
+    feature_row = build_dtrr_feature_row(anchor_data, target_task_list, val_data, std_series, idx)
     donor_block = feature_row[3:-3]
     donor_currents = donor_block[0::2]
     weighted_current = float(feature_row[-3])
@@ -562,7 +562,7 @@ def fallback_donor_trend_std(anchor_data, target_task_list, val_data, std_series
     return lag1
 
 
-def fit_donor_trend_model(anchor_data, target_task_list, val_data, top_k=3, min_points=12, alpha=2.0):
+def fit_dtrr_model(anchor_data, target_task_list, val_data, top_k=3, min_points=12, alpha=2.0):
     train_indices = np.where(val_data["train_mask"])[0]
     std_series = val_data["std_series_init"]
     X_train, y_train = [], []
@@ -571,7 +571,7 @@ def fit_donor_trend_model(anchor_data, target_task_list, val_data, top_k=3, min_
         y_std = std_series[idx]
         if not np.isfinite(y_std):
             continue
-        row = build_donor_trend_feature_row(anchor_data, target_task_list, val_data, std_series, idx, top_k=top_k)
+        row = build_dtrr_feature_row(anchor_data, target_task_list, val_data, std_series, idx, top_k=top_k)
         if row[-1] <= 0 and not np.isfinite(row[2]):
             continue
         X_train.append(row)
@@ -595,21 +595,21 @@ def fit_donor_trend_model(anchor_data, target_task_list, val_data, top_k=3, min_
     return model
 
 
-def predict_donor_trend_std_raw(model, anchor_data, target_task_list, val_data, std_series, idx, top_k=None):
+def predict_dtrr_std_raw(model, anchor_data, target_task_list, val_data, std_series, idx, top_k=None):
     if top_k is None:
         top_k = int(getattr(model, "_gsim_top_k", 3)) if model is not None else 3
-    feature_row = build_donor_trend_feature_row(anchor_data, target_task_list, val_data, std_series, idx, top_k=top_k)
+    feature_row = build_dtrr_feature_row(anchor_data, target_task_list, val_data, std_series, idx, top_k=top_k)
     if model is None:
-        return fallback_donor_trend_std(anchor_data, target_task_list, val_data, std_series, idx)
+        return fallback_dtrr_std(anchor_data, target_task_list, val_data, std_series, idx)
     return float(model.predict(feature_row.reshape(1, -1))[0])
 
 
-def recursive_predict_with_maml_donor_trend(model, anchor_data, target_task_list, val_data, top_k=3):
+def recursive_predict_with_dtrr(model, anchor_data, target_task_list, val_data, top_k=3):
     predictions = {}
     std_series = val_data["std_series_init"].copy()
     for idx in val_data["hide_indices"]:
         idx = int(idx)
-        pred_std = predict_donor_trend_std_raw(
+        pred_std = predict_dtrr_std_raw(
             model,
             anchor_data,
             target_task_list,
@@ -626,19 +626,19 @@ def recursive_predict_with_maml_donor_trend(model, anchor_data, target_task_list
     return predictions
 
 
-def method_maml_donor_trend(anchor_data, validation_set, similarity_df):
+def method_dtrr(anchor_data, validation_set, similarity_df):
     target_tasks = _build_target_tasks(similarity_df)
     predictions = {}
     for target_id, val_data in validation_set.items():
         task_list = target_tasks.get(target_id, [])
         if not task_list:
             continue
-        model = fit_donor_trend_model(anchor_data, task_list, val_data)
-        predictions.update(recursive_predict_with_maml_donor_trend(model, anchor_data, task_list, val_data))
+        model = fit_dtrr_model(anchor_data, task_list, val_data)
+        predictions.update(recursive_predict_with_dtrr(model, anchor_data, task_list, val_data))
     return predictions
 
 
-def stabilize_donor_trend_std(raw_pred, feature_row, model=None, recursive_depth=0):
+def stabilize_dtrr_std(raw_pred, feature_row, model=None, recursive_depth=0):
     pred_std = float(raw_pred)
     if not np.isfinite(pred_std):
         return np.nan
@@ -678,56 +678,15 @@ def stabilize_donor_trend_std(raw_pred, feature_row, model=None, recursive_depth
     return pred_std
 
 
-def predict_donor_trend_std(model, anchor_data, target_task_list, val_data, std_series, idx, top_k=None, recursive_depth=0):
+def predict_dtrr_std(model, anchor_data, target_task_list, val_data, std_series, idx, top_k=None, recursive_depth=0):
     if top_k is None:
         top_k = int(getattr(model, "_gsim_top_k", 3)) if model is not None else 3
-    feature_row = build_donor_trend_feature_row(anchor_data, target_task_list, val_data, std_series, idx, top_k=top_k)
+    feature_row = build_dtrr_feature_row(anchor_data, target_task_list, val_data, std_series, idx, top_k=top_k)
     if model is None:
-        raw_pred = fallback_donor_trend_std(anchor_data, target_task_list, val_data, std_series, idx)
+        raw_pred = fallback_dtrr_std(anchor_data, target_task_list, val_data, std_series, idx)
     else:
         raw_pred = float(model.predict(feature_row.reshape(1, -1))[0])
-    return stabilize_donor_trend_std(raw_pred, feature_row, model=model, recursive_depth=recursive_depth)
-
-
-def recursive_predict_with_donor_trend(model, anchor_data, target_task_list, val_data, top_k=3):
-    predictions = {}
-    std_series = val_data["std_series_init"].copy()
-    hide_set = {int(i) for i in val_data["hide_indices"]}
-    recursive_depth = 0
-    for idx in val_data["hide_indices"]:
-        idx = int(idx)
-        if idx - 1 in hide_set:
-            recursive_depth += 1
-        else:
-            recursive_depth = 0
-        pred_std = predict_donor_trend_std(
-            model,
-            anchor_data,
-            target_task_list,
-            val_data,
-            std_series,
-            idx,
-            top_k=top_k,
-            recursive_depth=recursive_depth,
-        )
-        pred_orig = float(from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
-        true_orig = val_data["y_original_all"][idx]
-        if np.isfinite(true_orig) and np.isfinite(pred_orig):
-            predictions[(val_data["station_id"], int(idx))] = {"true": float(true_orig), "pred": pred_orig}
-            std_series[idx] = pred_std
-    return predictions
-
-
-def method_donor_trend(anchor_data, validation_set, similarity_df):
-    target_tasks = _build_target_tasks(similarity_df)
-    predictions = {}
-    for target_id, val_data in validation_set.items():
-        task_list = target_tasks.get(target_id, [])
-        if not task_list:
-            continue
-        model = fit_donor_trend_model(anchor_data, task_list, val_data)
-        predictions.update(recursive_predict_with_donor_trend(model, anchor_data, task_list, val_data))
-    return predictions
+    return stabilize_dtrr_std(raw_pred, feature_row, model=model, recursive_depth=recursive_depth)
 
 
 def train_ml_model(anchor_data, model_type):
