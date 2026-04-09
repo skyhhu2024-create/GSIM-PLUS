@@ -27,20 +27,15 @@ HYBRID_SCHEMES = {
         "Q2": "MAML",
         "Q3": "MAML",
     },
-    "maml_donor_trend_only": {
-        "Q1": "MAML_DonorTrend",
-        "Q2": "MAML_DonorTrend",
-        "Q3": "MAML_DonorTrend",
+    "dtrr_only": {
+        "Q1": "DTRR",
+        "Q2": "DTRR",
+        "Q3": "DTRR",
     },
-    "maml_donor_trend_guarded": {
-        "Q1": "MAML_DonorTrend",
-        "Q2": "MAML_DonorTrend",
-        "Q3": "MAML_DonorTrend",
-    },
-    "donor_trend_only": {
-        "Q1": "DonorTrend",
-        "Q2": "DonorTrend",
-        "Q3": "DonorTrend",
+    "dtrr_guarded": {
+        "Q1": "DTRR",
+        "Q2": "DTRR",
+        "Q3": "DTRR",
     },
     "maml_calibrated_only": {
         "Q1": "MAML_Calibrated",
@@ -184,39 +179,12 @@ def method_maml_product(anchor_data, validation_set, similarity_df, trained_mode
     return predictions
 
 
-def recursive_predict_with_donor_trend_product(model, anchor_data, target_task_list, val_data):
-    predictions = {}
-    std_series = val_data["std_series_init"].copy()
-    hide_set = {int(i) for i in val_data["hide_indices"]}
-    recursive_depth = 0
-    for idx in val_data["hide_indices"]:
-        idx = int(idx)
-        if idx - 1 in hide_set:
-            recursive_depth += 1
-        else:
-            recursive_depth = 0
-        pred_std = core.predict_donor_trend_std(
-            model,
-            anchor_data,
-            target_task_list,
-            val_data,
-            std_series,
-            idx,
-            recursive_depth=recursive_depth,
-        )
-        pred_orig = float(core.from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
-        if np.isfinite(pred_orig):
-            predictions[(val_data["station_id"], int(idx))] = {"pred": pred_orig}
-            std_series[idx] = pred_std
-    return predictions
-
-
-def recursive_predict_with_maml_donor_trend_product(model, anchor_data, target_task_list, val_data):
+def recursive_predict_with_dtrr_product(model, anchor_data, target_task_list, val_data):
     predictions = {}
     std_series = val_data["std_series_init"].copy()
     for idx in val_data["hide_indices"]:
         idx = int(idx)
-        pred_std = core.predict_donor_trend_std_raw(
+        pred_std = core.predict_dtrr_std_raw(
             model,
             anchor_data,
             target_task_list,
@@ -231,7 +199,7 @@ def recursive_predict_with_maml_donor_trend_product(model, anchor_data, target_t
     return predictions
 
 
-def method_donor_trend_product(anchor_data, validation_set, similarity_df):
+def method_dtrr_product(anchor_data, validation_set, similarity_df):
     target_tasks = defaultdict(list)
     for _, row in similarity_df.iterrows():
         target_tasks[row["target_station"]].append({"anchor": row["anchor_station"], "similarity": row["similarity"]})
@@ -241,23 +209,8 @@ def method_donor_trend_product(anchor_data, validation_set, similarity_df):
         task_list = target_tasks.get(target_id, [])
         if not task_list:
             continue
-        model = core.fit_donor_trend_model(anchor_data, task_list, val_data)
-        predictions.update(recursive_predict_with_donor_trend_product(model, anchor_data, task_list, val_data))
-    return predictions
-
-
-def method_maml_donor_trend_product(anchor_data, validation_set, similarity_df):
-    target_tasks = defaultdict(list)
-    for _, row in similarity_df.iterrows():
-        target_tasks[row["target_station"]].append({"anchor": row["anchor_station"], "similarity": row["similarity"]})
-
-    predictions = {}
-    for target_id, val_data in validation_set.items():
-        task_list = target_tasks.get(target_id, [])
-        if not task_list:
-            continue
-        model = core.fit_donor_trend_model(anchor_data, task_list, val_data)
-        predictions.update(recursive_predict_with_maml_donor_trend_product(model, anchor_data, task_list, val_data))
+        model = core.fit_dtrr_model(anchor_data, task_list, val_data)
+        predictions.update(recursive_predict_with_dtrr_product(model, anchor_data, task_list, val_data))
     return predictions
 
 
@@ -267,11 +220,8 @@ def get_scheme_predictions(station_id, entry, anchor_data, similarity_df, models
     predictions_by_method = {}
 
     for method_name in required_methods:
-        if method_name == "MAML_DonorTrend":
-            predictions_by_method[method_name] = method_maml_donor_trend_product(anchor_data, validation_set, similarity_df)
-            continue
-        if method_name == "DonorTrend":
-            predictions_by_method[method_name] = method_donor_trend_product(anchor_data, validation_set, similarity_df)
+        if method_name == "DTRR":
+            predictions_by_method[method_name] = method_dtrr_product(anchor_data, validation_set, similarity_df)
             continue
 
         if method_name in {"MAML", "MAML_Calibrated"}:
@@ -300,7 +250,7 @@ def apply_low_flow_guard(scheme_rules, base_data, guard_low_flow=False):
         return dict(scheme_rules)
     median_flow = station_median_flow(base_data)
     if np.isfinite(median_flow) and median_flow < LOW_FLOW_MEDIAN_THRESHOLD:
-        return {flag: ("MAML" if method == "MAML_DonorTrend" else method) for flag, method in scheme_rules.items()}
+        return {flag: ("MAML" if method == "DTRR" else method) for flag, method in scheme_rules.items()}
     return dict(scheme_rules)
 
 
@@ -405,8 +355,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Build GSIM-PLUS product with single or hybrid imputation schemes.")
     parser.add_argument(
         "--scheme",
-        choices=["maml_only", "maml_donor_trend_only", "maml_donor_trend_guarded", "donor_trend_only", "maml_calibrated_only", "hybrid_v1", "hybrid_v2", "all"],
-        default="maml_only",
+        choices=["maml_only", "dtrr_only", "dtrr_guarded", "maml_calibrated_only", "hybrid_v1", "hybrid_v2", "all"],
+        default="dtrr_guarded",
         help="Imputation scheme to run. 'all' generates all configured schemes.",
     )
     return parser.parse_args()
@@ -428,7 +378,7 @@ def production_method_label(scheme_rules):
 def run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df, models):
     output_dir = scheme_output_dir(scheme_name)
     output_dir.mkdir(parents=True, exist_ok=True)
-    guard_low_flow = scheme_name == "maml_donor_trend_guarded"
+    guard_low_flow = scheme_name == "dtrr_guarded"
 
     summaries = []
     gsim_fill_dir = output_dir / "GSIM_fill"
@@ -519,7 +469,7 @@ def main():
             method
             for scheme_name, scheme_rules in (list(HYBRID_SCHEMES.items()) if args.scheme == "all" else [(args.scheme, HYBRID_SCHEMES[args.scheme])])
             for method in (
-                list(scheme_rules.values()) + (["MAML"] if scheme_name == "maml_donor_trend_guarded" else [])
+                list(scheme_rules.values()) + (["MAML"] if scheme_name == "dtrr_guarded" else [])
             )
         )
     )
@@ -547,3 +497,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
