@@ -603,8 +603,8 @@ def main():
             "context_risk_flag",
             "guard_applied",
         ],
-        "station_split_dir": str(anchor_fill_dir),
-        "similarity_file": str(anchor_similarity_path),
+        "station_split_dir": anchor_fill_dir.name,
+        "similarity_file": anchor_similarity_path.name,
     }
     with open(output_dir / "gsim_plus_anchor_product_summary.json", "w", encoding="utf-8") as f:
         json.dump(product_summary, f, indent=2)

@@ -460,7 +460,7 @@ def run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df
             "context_risk_flag",
             "guard_applied",
         ],
-        "station_split_dir": str(gsim_fill_dir),
+        "station_split_dir": gsim_fill_dir.name,
     }
 
     with open(output_dir / "gsim_plus_product_summary.json", "w", encoding="utf-8") as f:
