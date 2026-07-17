@@ -42,9 +42,7 @@ plt.rcParams.update({
 # ── config ───────────────────────────────────────────────────────────────
 METHODS = ["MAML", "DTRR", "RandomForest", "Linear",
            "LSTM", "KNN", "SeasonalMean", "IDW"]
-PREDICTION_FILES = {
-    "DTRR": "DonorTrend_predictions.csv",
-}
+PREDICTION_FILES = {method: f"{method}_predictions.csv" for method in METHODS}
 METHOD_LABELS = {
     "MAML":          "MAML",
     "DTRR":"DTRR",

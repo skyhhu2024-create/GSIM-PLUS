@@ -271,22 +271,23 @@ def build_anchor_to_anchor_topk():
     return topk, weights_df
 
 
-def recursive_predict_with_maml_product(model, val_data, device, calibration=None):
+def recursive_predict_with_maml_product(model, val_data, device):
     predictions = {}
     std_series = val_data["std_series_init"].copy()
     with torch.no_grad():
         for idx in val_data["hide_indices"]:
             x_row = core.build_feature_row(val_data, std_series, idx)
             pred_std = float(model(torch.FloatTensor(x_row).unsqueeze(0).to(device)).cpu().numpy()[0, 0])
-            pred_std = core.apply_linear_calibration(pred_std, calibration)
-            pred_orig = float(core.from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+            pred_std, pred_orig = core.constrain_nonnegative_prediction(
+                pred_std, val_data["flow_mean"], val_data["flow_std"]
+            )
             if np.isfinite(pred_orig):
                 predictions[(val_data["station_id"], int(idx))] = {"pred": pred_orig}
                 std_series[idx] = pred_std
     return predictions
 
 
-def method_maml_product(anchor_data, validation_set, similarity_df, trained_model, calibrated=False):
+def method_maml_product(anchor_data, validation_set, similarity_df, trained_model):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     maml_config = {
         "inner_lr": 0.05,
@@ -313,8 +314,7 @@ def method_maml_product(anchor_data, validation_set, similarity_df, trained_mode
         )
         if adapted_model is None:
             continue
-        calibration = core.fit_maml_station_calibration(adapted_model, val_data, device) if calibrated else None
-        predictions.update(recursive_predict_with_maml_product(adapted_model, val_data, device, calibration))
+        predictions.update(recursive_predict_with_maml_product(adapted_model, val_data, device))
 
     return predictions
 
@@ -332,7 +332,9 @@ def recursive_predict_with_dtrr_product(model, anchor_data, target_task_list, va
             std_series,
             idx,
         )
-        pred_orig = float(core.from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+        pred_std, pred_orig = core.constrain_nonnegative_prediction(
+            pred_std, val_data["flow_mean"], val_data["flow_std"]
+        )
         if np.isfinite(pred_orig):
             predictions[(val_data["station_id"], int(idx))] = {"pred": pred_orig}
             std_series[idx] = pred_std
@@ -362,7 +364,6 @@ def method_product(anchor_data, validation_set, similarity_df, model_obj, method
         validation_set,
         similarity_df,
         trained_model=model_obj,
-        calibrated=(method_name == "MAML_Calibrated"),
     )
 
 
@@ -489,7 +490,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Build GSIM-PLUS anchor product with a selected fill method.")
     parser.add_argument(
         "--method",
-        choices=["MAML", "MAML_Calibrated", "DTRR", "DTRR_Guarded"],
+        choices=["MAML", "DTRR", "DTRR_Guarded"],
         default="DTRR_Guarded",
         help="Method used for anchor-station filling.",
     )
@@ -579,7 +580,8 @@ def main():
                         index=False,
                     )
                     infilled_written = True
-        except Exception:
+        except Exception as exc:
+            print(f"  ERROR {station_id}: {exc}")
             summaries.append({"station_id": station_id, "filled_points": 0, "status": "error"})
 
     summary_df = pd.DataFrame(summaries)
@@ -592,6 +594,7 @@ def main():
         "study_period": f"{STUDY_START_YEAR}-{STUDY_END_YEAR}",
         "production_method": "DTRR + low_flow_guard" if args.method == "DTRR_Guarded" else args.method,
         "low_flow_guard_threshold_m3s": LOW_FLOW_MEDIAN_THRESHOLD if args.method == "DTRR_Guarded" else None,
+        "nonnegative_prediction_constraint": True,
         "contextual_risk_fields": [
             "kg_major",
             "kg_code",

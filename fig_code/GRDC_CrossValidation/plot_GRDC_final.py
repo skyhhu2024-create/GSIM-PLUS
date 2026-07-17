@@ -114,7 +114,7 @@ for i in range(16):
     else:
         ax.axis('off')
 
-fig.suptitle('Scatter Plot - GRDC Validation', fontsize=12, fontweight='bold', y=0.995)
+fig.suptitle('Scatter Plot - GRDC Reference Comparison', fontsize=12, fontweight='bold', y=0.995)
 plt.tight_layout()
 fig.savefig(OUTDIR / "Fig_GRDC_scatter.png", dpi=600, bbox_inches='tight', facecolor='white')
 fig.savefig(OUTDIR / "Fig_GRDC_scatter.pdf", bbox_inches='tight')
@@ -166,7 +166,7 @@ for i in range(16):
     else:
         ax.axis('off')
 
-fig.suptitle('Time Series - GRDC Validation', fontsize=12, fontweight='bold', y=0.995)
+fig.suptitle('Time Series - GRDC Reference Comparison', fontsize=12, fontweight='bold', y=0.995)
 fig.legend(
     handles=[
         plt.Line2D([0], [0], color='#222222', lw=1.2, label='GRDC'),

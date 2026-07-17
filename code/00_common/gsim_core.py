@@ -7,6 +7,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.func import functional_call
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import Ridge
@@ -44,6 +45,16 @@ def from_std(values, flow_mean, flow_std):
     if np.isfinite(flow_std) and flow_std > 0:
         return values * flow_std + flow_mean
     return values.copy()
+
+
+def constrain_nonnegative_prediction(pred_std, flow_mean, flow_std):
+    """Back-transform a prediction and enforce the physical Q >= 0 boundary."""
+    pred_orig = float(from_std(pred_std, flow_mean, flow_std))
+    if not np.isfinite(pred_orig):
+        return float(pred_std), pred_orig
+    pred_orig = max(0.0, pred_orig)
+    constrained_std = float(to_std(pred_orig, flow_mean, flow_std))
+    return constrained_std, pred_orig
 
 
 def station_seed(station_id, scenario_code):
@@ -231,7 +242,9 @@ def recursive_predict_with_sklearn(model, val_data):
     for idx in val_data["hide_indices"]:
         x_row = build_feature_row(val_data, std_series, idx).reshape(1, -1)
         pred_std = float(model.predict(x_row)[0])
-        pred_orig = float(from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+        pred_std, pred_orig = constrain_nonnegative_prediction(
+            pred_std, val_data["flow_mean"], val_data["flow_std"]
+        )
         true_orig = val_data["y_original_all"][idx]
         if np.isfinite(true_orig) and np.isfinite(pred_orig):
             predictions[(val_data["station_id"], int(idx))] = {"true": float(true_orig), "pred": pred_orig}
@@ -246,101 +259,9 @@ def recursive_predict_with_maml(model, val_data, device):
         for idx in val_data["hide_indices"]:
             x_row = build_feature_row(val_data, std_series, idx)
             pred_std = float(model(torch.FloatTensor(x_row).unsqueeze(0).to(device)).cpu().numpy()[0, 0])
-            pred_orig = float(from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
-            true_orig = val_data["y_original_all"][idx]
-            if np.isfinite(true_orig) and np.isfinite(pred_orig):
-                predictions[(val_data["station_id"], int(idx))] = {"true": float(true_orig), "pred": pred_orig}
-                std_series[idx] = pred_std
-    return predictions
-
-
-def _identity_calibration():
-    return {
-        "slope": 1.0,
-        "intercept": 0.0,
-        "enabled": False,
-        "n_points": 0,
-    }
-
-
-def apply_linear_calibration(pred_std, calibration):
-    if not calibration or not calibration.get("enabled", False):
-        return float(pred_std)
-    return float(calibration["slope"] * pred_std + calibration["intercept"])
-
-
-def fit_maml_station_calibration(
-    model,
-    val_data,
-    device,
-    min_points=12,
-    slope_bounds=(0.8, 1.2),
-    intercept_bounds=(-0.5, 0.5),
-):
-    train_indices = np.where(val_data["train_mask"])[0]
-    if len(train_indices) < min_points:
-        return _identity_calibration()
-
-    pred_std, true_std = [], []
-    std_series = val_data["std_series_init"]
-    with torch.no_grad():
-        for idx in train_indices:
-            true_val = std_series[idx]
-            if not np.isfinite(true_val):
-                continue
-            x_row = build_feature_row(val_data, std_series, idx)
-            pred_val = float(model(torch.FloatTensor(x_row).unsqueeze(0).to(device)).cpu().numpy()[0, 0])
-            if np.isfinite(pred_val):
-                pred_std.append(pred_val)
-                true_std.append(float(true_val))
-
-    if len(pred_std) < min_points:
-        return _identity_calibration()
-
-    pred_std = np.asarray(pred_std, dtype=float)
-    true_std = np.asarray(true_std, dtype=float)
-    pred_mean = float(np.mean(pred_std))
-    true_mean = float(np.mean(true_std))
-    denom = float(np.sum((pred_std - pred_mean) ** 2))
-
-    if denom <= 1e-8:
-        raw_slope = 1.0
-        raw_intercept = true_mean - pred_mean
-    else:
-        raw_slope = float(np.sum((pred_std - pred_mean) * (true_std - true_mean)) / denom)
-        raw_intercept = float(true_mean - raw_slope * pred_mean)
-
-    shrink = len(pred_std) / (len(pred_std) + 24.0)
-    slope = 1.0 + shrink * (raw_slope - 1.0)
-    intercept = shrink * raw_intercept
-    slope = float(np.clip(slope, slope_bounds[0], slope_bounds[1]))
-    intercept = float(np.clip(intercept, intercept_bounds[0], intercept_bounds[1]))
-
-    base_rmse = float(np.sqrt(np.mean((true_std - pred_std) ** 2)))
-    calibrated_pred = slope * pred_std + intercept
-    cal_rmse = float(np.sqrt(np.mean((true_std - calibrated_pred) ** 2)))
-    if cal_rmse >= base_rmse:
-        return _identity_calibration()
-
-    return {
-        "slope": slope,
-        "intercept": intercept,
-        "enabled": True,
-        "n_points": int(len(pred_std)),
-        "base_rmse": base_rmse,
-        "cal_rmse": cal_rmse,
-    }
-
-
-def recursive_predict_with_maml_calibrated(model, val_data, device, calibration):
-    predictions = {}
-    std_series = val_data["std_series_init"].copy()
-    with torch.no_grad():
-        for idx in val_data["hide_indices"]:
-            x_row = build_feature_row(val_data, std_series, idx)
-            pred_std = float(model(torch.FloatTensor(x_row).unsqueeze(0).to(device)).cpu().numpy()[0, 0])
-            pred_std = apply_linear_calibration(pred_std, calibration)
-            pred_orig = float(from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+            pred_std, pred_orig = constrain_nonnegative_prediction(
+                pred_std, val_data["flow_mean"], val_data["flow_std"]
+            )
             true_orig = val_data["y_original_all"][idx]
             if np.isfinite(true_orig) and np.isfinite(pred_orig):
                 predictions[(val_data["station_id"], int(idx))] = {"true": float(true_orig), "pred": pred_orig}
@@ -357,7 +278,9 @@ def recursive_predict_with_lstm(model, val_data, device, seq_len):
                 continue
             x_window = build_sequence_window(val_data, std_series, idx, seq_len)
             pred_std = float(model(torch.FloatTensor(x_window).unsqueeze(0).to(device)).cpu().numpy()[0, 0])
-            pred_orig = float(from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+            pred_std, pred_orig = constrain_nonnegative_prediction(
+                pred_std, val_data["flow_mean"], val_data["flow_std"]
+            )
             true_orig = val_data["y_original_all"][idx]
             if np.isfinite(true_orig) and np.isfinite(pred_orig):
                 predictions[(val_data["station_id"], int(idx))] = {"true": float(true_orig), "pred": pred_orig}
@@ -419,7 +342,9 @@ def method_idw(anchor_data, validation_set, similarity_df):
                         values.append(val)
             if weights:
                 pred_std = float(np.average(values, weights=weights))
-                pred_orig = float(from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+                pred_std, pred_orig = constrain_nonnegative_prediction(
+                    pred_std, val_data["flow_mean"], val_data["flow_std"]
+                )
                 true_orig = val_data["y_original_all"][idx]
                 if np.isfinite(true_orig):
                     predictions[(target_id, int(idx))] = {"true": float(true_orig), "pred": pred_orig}
@@ -451,7 +376,9 @@ def method_baseline(anchor_data, validation_set, similarity_df):
                         weight_total += sim_info["similarity"]
             if weight_total > 0:
                 pred_std = weighted_sum / weight_total
-                pred_orig = float(from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+                pred_std, pred_orig = constrain_nonnegative_prediction(
+                    pred_std, val_data["flow_mean"], val_data["flow_std"]
+                )
                 true_orig = val_data["y_original_all"][idx]
                 if np.isfinite(true_orig):
                     predictions[(target_id, int(idx))] = {"true": float(true_orig), "pred": pred_orig}
@@ -476,7 +403,9 @@ def method_seasonal(anchor_data, validation_set, similarity_df):
                         values.extend(month_vals[np.isfinite(month_vals)])
             if values:
                 pred_std = float(np.mean(values))
-                pred_orig = float(from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+                pred_std, pred_orig = constrain_nonnegative_prediction(
+                    pred_std, val_data["flow_mean"], val_data["flow_std"]
+                )
                 true_orig = val_data["y_original_all"][idx]
                 if np.isfinite(true_orig):
                     predictions[(target_id, int(idx))] = {"true": float(true_orig), "pred": pred_orig}
@@ -618,7 +547,9 @@ def recursive_predict_with_dtrr(model, anchor_data, target_task_list, val_data, 
             idx,
             top_k=top_k,
         )
-        pred_orig = float(from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+        pred_std, pred_orig = constrain_nonnegative_prediction(
+            pred_std, val_data["flow_mean"], val_data["flow_std"]
+        )
         true_orig = val_data["y_original_all"][idx]
         if np.isfinite(true_orig) and np.isfinite(pred_orig):
             predictions[(val_data["station_id"], int(idx))] = {"true": float(true_orig), "pred": pred_orig}
@@ -764,28 +695,35 @@ def _extract_base_from_validation(validation_set):
     return task_base
 
 
-def _sample_meta_hide_indices(base_data, rng):
-    valid_mask = base_data["valid"]
+def _sample_anchor_meta_hide_indices(anchor_info, scenario, rng):
+    valid_mask = np.asarray(anchor_info["valid"], dtype=bool)
     valid_indices = np.where(valid_mask)[0]
     if len(valid_indices) < 24:
         return None
 
-    scenario = rng.choice(["random30", "block3", "block6", "block12"], p=[0.35, 0.25, 0.20, 0.20])
     if scenario == "random30":
         n_hide = max(1, int(len(valid_indices) * 0.30))
         if len(valid_indices) - n_hide < 12:
             return None
         return np.sort(rng.choice(valid_indices, n_hide, replace=False))
 
-    gap_length = int(scenario.replace("block", ""))
-    starts = []
-    for start_idx in range(len(valid_mask) - gap_length + 1):
-        if valid_mask[start_idx : start_idx + gap_length].all():
-            starts.append(start_idx)
-    if not starts:
-        return None
-    start_idx = int(rng.choice(starts))
-    return np.arange(start_idx, start_idx + gap_length, dtype=int)
+    if scenario == "block25plus":
+        gap_lengths = list(rng.permutation([25, 36, 48]))
+    else:
+        gap_lengths = [int(scenario.replace("block", ""))]
+
+    for gap_length in gap_lengths:
+        if len(valid_indices) - gap_length < 12:
+            continue
+        starts = [
+            start_idx
+            for start_idx in range(len(valid_mask) - gap_length + 1)
+            if valid_mask[start_idx : start_idx + gap_length].all()
+        ]
+        if starts:
+            start_idx = int(rng.choice(starts))
+            return np.arange(start_idx, start_idx + gap_length, dtype=int)
+    return None
 
 
 def build_anchor_support_tensors(anchor_data, target_task_list, device, min_points=6):
@@ -871,7 +809,8 @@ def adapt_maml_model(base_model, anchor_support, self_support, inner_lr, inner_s
 
     adapted_model = copy.deepcopy(base_model)
     inner_opt = optim.SGD(adapted_model.parameters(), lr=inner_lr)
-    adapted_model.train()
+    # Keep adaptation deterministic so cached and freshly trained base models agree.
+    adapted_model.eval()
 
     if len(support_batches) == 1:
         step_plan = [inner_steps]
@@ -893,8 +832,100 @@ def adapt_maml_model(base_model, anchor_support, self_support, inner_lr, inner_s
     return adapted_model
 
 
+def _maml_inner_update(model, support_x, support_y, inner_lr, inner_steps, first_order=True):
+    """Return task-adapted parameters while retaining the meta-gradient path."""
+    adapted_params = dict(model.named_parameters())
+    for _ in range(inner_steps):
+        support_pred = functional_call(model, adapted_params, (support_x,))
+        support_loss = nn.MSELoss()(support_pred, support_y)
+        grads = torch.autograd.grad(
+            support_loss,
+            tuple(adapted_params.values()),
+            create_graph=not first_order,
+        )
+
+        grad_norm = torch.sqrt(sum(torch.sum(grad * grad) for grad in grads))
+        clip_scale = torch.clamp(1.0 / (grad_norm + 1e-6), max=1.0)
+        adapted_params = {
+            name: param - inner_lr * grad * clip_scale
+            for (name, param), grad in zip(adapted_params.items(), grads)
+        }
+    return adapted_params
+
+
+def _build_anchor_meta_support(anchor_info, hide_indices, device):
+    valid_mask = np.asarray(anchor_info["valid"], dtype=bool)
+    train_mask = valid_mask.copy()
+    train_mask[hide_indices] = False
+    if train_mask.sum() < 12:
+        return None
+
+    y_original = np.asarray(anchor_info["y_original"], dtype=float)
+    train_values = y_original[train_mask]
+    flow_mean = float(np.nanmean(train_values))
+    flow_std = float(pd.Series(train_values).std())
+    std_all = to_std(y_original, flow_mean, flow_std)
+    std_series = np.full(len(y_original), np.nan, dtype=float)
+    std_series[train_mask] = std_all[train_mask]
+
+    support_x, support_y = [], []
+    for idx in np.where(train_mask)[0]:
+        lag1 = std_series[idx - 1] if idx > 0 and np.isfinite(std_series[idx - 1]) else 0.0
+        support_x.append([anchor_info["month_sin"][idx], anchor_info["month_cos"][idx], lag1])
+        support_y.append(std_all[idx])
+
+    return (
+        torch.tensor(np.asarray(support_x), dtype=torch.float32, device=device),
+        torch.tensor(np.asarray(support_y).reshape(-1, 1), dtype=torch.float32, device=device),
+        std_series,
+        std_all,
+        float(to_std(0.0, flow_mean, flow_std)),
+    )
+
+
+def _anchor_recursive_query_loss(
+    model,
+    adapted_params,
+    anchor_info,
+    hide_indices,
+    std_series,
+    std_all,
+    zero_std,
+    device,
+):
+    predicted = {}
+    query_pred, query_true = [], []
+    for idx in np.sort(hide_indices):
+        if idx > 0 and (idx - 1) in predicted:
+            lag1 = predicted[idx - 1]
+        elif idx > 0 and np.isfinite(std_series[idx - 1]):
+            lag1 = torch.tensor(float(std_series[idx - 1]), dtype=torch.float32, device=device)
+        else:
+            lag1 = torch.tensor(0.0, dtype=torch.float32, device=device)
+
+        feature = torch.stack(
+            [
+                torch.tensor(float(anchor_info["month_sin"][idx]), dtype=torch.float32, device=device),
+                torch.tensor(float(anchor_info["month_cos"][idx]), dtype=torch.float32, device=device),
+                lag1,
+            ]
+        ).reshape(1, -1)
+        pred = functional_call(model, adapted_params, (feature,)).reshape(())
+        pred = torch.clamp(pred, min=float(zero_std))
+        predicted[int(idx)] = pred
+        query_pred.append(pred)
+        query_true.append(float(std_all[idx]))
+
+    if not query_pred:
+        return None
+    pred_tensor = torch.stack(query_pred)
+    true_tensor = torch.tensor(query_true, dtype=torch.float32, device=device)
+    return nn.MSELoss()(pred_tensor, true_tensor)
+
+
 def train_maml_model(anchor_data, similarity_df, task_base_data, config):
     print("Training MAML meta-model...")
+    set_global_seed(RANDOM_SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MAMLModel(
         input_dim=config.get("input_dim", 3),
@@ -902,45 +933,71 @@ def train_maml_model(anchor_data, similarity_df, task_base_data, config):
     ).to(device)
     meta_optimizer = optim.Adam(model.parameters(), lr=config["meta_lr"])
 
-    tasks = []
-    for _, row in similarity_df.iterrows():
-        anchor_id = row["anchor_station"]
-        if anchor_id in anchor_data:
-            tasks.append({"anchor": anchor_id, "similarity": row["similarity"]})
+    del task_base_data
+    tasks = sorted(
+        {
+            anchor_id
+            for anchor_id in similarity_df["anchor_station"].astype(str)
+            if anchor_id in anchor_data
+        }
+    )
     if not tasks:
         raise ValueError("No valid anchor-side tasks available for MAML training.")
 
+    first_order = config.get("first_order", True)
+    scenarios = config.get("meta_scenarios", ["random30", "block3", "block6", "block12", "block25plus"])
+    scenario_counts = defaultdict(int)
+    model.eval()
     for epoch in range(config["epochs"]):
-        epoch_loss = 0.0
+        task_losses = []
         batch_size = min(config["meta_batch_size"], len(tasks))
         batch_tasks = np.random.choice(len(tasks), batch_size, replace=False)
 
-        for task_idx in batch_tasks:
-            task = tasks[task_idx]
-            anchor_info = anchor_data[task["anchor"]]
-            valid_mask = anchor_info["valid"]
-            if valid_mask.sum() < 12:
+        for batch_position, task_idx in enumerate(batch_tasks):
+            anchor_id = tasks[task_idx]
+            anchor_info = anchor_data[anchor_id]
+            rng = np.random.default_rng(station_seed(anchor_id, (epoch + 1) * 100 + batch_position))
+            hide_indices = None
+            selected_scenario = None
+            start_scenario = (epoch * batch_size + batch_position) % len(scenarios)
+            for offset in range(len(scenarios)):
+                candidate = scenarios[(start_scenario + offset) % len(scenarios)]
+                hide_indices = _sample_anchor_meta_hide_indices(anchor_info, candidate, rng)
+                if hide_indices is not None:
+                    selected_scenario = candidate
+                    break
+            if hide_indices is None:
                 continue
 
-            X = torch.FloatTensor(anchor_info["X"][valid_mask]).to(device)
-            y = torch.FloatTensor(anchor_info["y"][valid_mask]).reshape(-1, 1).to(device)
-            n_support = len(X) // 2
-            support_x, support_y = X[:n_support], y[:n_support]
-            query_x, query_y = X[n_support:], y[n_support:]
+            support = _build_anchor_meta_support(anchor_info, hide_indices, device)
+            if support is None:
+                continue
+            support_x, support_y, std_series, std_all, zero_std = support
 
-            adapted_model = copy.deepcopy(model)
-            inner_opt = optim.SGD(adapted_model.parameters(), lr=config["inner_lr"])
-            for _ in range(config["inner_steps"]):
-                inner_opt.zero_grad()
-                loss = nn.MSELoss()(adapted_model(support_x), support_y)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(adapted_model.parameters(), 1.0)
-                inner_opt.step()
+            adapted_params = _maml_inner_update(
+                model,
+                support_x,
+                support_y,
+                inner_lr=config["inner_lr"],
+                inner_steps=config["inner_steps"],
+                first_order=first_order,
+            )
+            task_loss = _anchor_recursive_query_loss(
+                model,
+                adapted_params,
+                anchor_info,
+                hide_indices,
+                std_series,
+                std_all,
+                zero_std,
+                device,
+            )
+            if task_loss is not None and torch.isfinite(task_loss):
+                task_losses.append(task_loss)
+                scenario_counts[selected_scenario] += 1
 
-            task_loss = nn.MSELoss()(adapted_model(query_x), query_y)
-            epoch_loss += task_loss
-
-        if epoch_loss > 0:
+        if task_losses:
+            epoch_loss = torch.stack(task_losses).mean()
             meta_optimizer.zero_grad()
             epoch_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -948,7 +1005,8 @@ def train_maml_model(anchor_data, similarity_df, task_base_data, config):
         if (epoch + 1) % 20 == 0:
             print(f"  MAML epoch {epoch + 1}/{config['epochs']}")
 
-    print("  MAML training complete")
+    print(f"  MAML training complete: {dict(scenario_counts)}")
+    model.eval()
     return model
 
 
@@ -962,6 +1020,8 @@ def method_maml(anchor_data, validation_set, similarity_df, trained_model=None):
         "epochs": 60,
         "hidden_dim": 64,
         "input_dim": 3,
+        "first_order": True,
+        "meta_scenarios": ["random30", "block3", "block6", "block12", "block25plus"],
     }
 
     model = train_maml_model(anchor_data, similarity_df, None, maml_config) if trained_model is None else trained_model
@@ -984,42 +1044,6 @@ def method_maml(anchor_data, validation_set, similarity_df, trained_model=None):
         if adapted_model is None:
             continue
         predictions.update(recursive_predict_with_maml(adapted_model, val_data, device))
-    return predictions
-
-
-def method_maml_calibrated(anchor_data, validation_set, similarity_df, trained_model=None):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    maml_config = {
-        "meta_lr": 0.001,
-        "inner_lr": 0.05,
-        "inner_steps": 10,
-        "meta_batch_size": 8,
-        "epochs": 60,
-        "hidden_dim": 64,
-        "input_dim": 3,
-    }
-
-    model = train_maml_model(anchor_data, similarity_df, None, maml_config) if trained_model is None else trained_model
-    model.eval()
-
-    target_tasks = _build_target_tasks(similarity_df)
-    predictions = {}
-    for target_id, val_data in validation_set.items():
-        if target_id not in target_tasks:
-            continue
-        anchor_support = build_anchor_support_tensors(anchor_data, target_tasks[target_id], device)
-        self_support = build_self_support_tensors(val_data, device)
-        adapted_model = adapt_maml_model(
-            model,
-            anchor_support,
-            self_support,
-            inner_lr=maml_config["inner_lr"],
-            inner_steps=maml_config["inner_steps"],
-        )
-        if adapted_model is None:
-            continue
-        calibration = fit_maml_station_calibration(adapted_model, val_data, device)
-        predictions.update(recursive_predict_with_maml_calibrated(adapted_model, val_data, device, calibration))
     return predictions
 
 

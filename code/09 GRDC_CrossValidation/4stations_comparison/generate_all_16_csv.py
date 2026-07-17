@@ -14,7 +14,7 @@ OUTDIR = ROOT / "09 GRDC交叉验证" / "4stations_comparison"
 
 # Station mapping (corrected)
 stations = {
-    'FR_0001112': {'grdc_id': '6135110', 'continent': 'Europe'},
+    'FR_0001112': {'grdc_id': '6135110', 'continent': 'EU'},
     'US_0005774': {'grdc_id': '4125804', 'continent': 'USA'},
     'US_0002812': {'grdc_id': '4123245', 'continent': 'USA'},
     'US_0004183': {'grdc_id': '4119313', 'continent': 'USA'},
@@ -56,11 +56,7 @@ for gsim_id, info in stations.items():
     grdc_id = info['grdc_id']
     continent = info['continent']
 
-    # Check if CSV already exists
     csv_file = OUTDIR / f"{gsim_id}_{grdc_id}_comparison.csv"
-    if csv_file.exists():
-        print(f"{gsim_id}: Already exists")
-        continue
 
     # Load GRDC
     grdc_dir = GRDC_BASE / f"{continent}-GRDC"
@@ -93,7 +89,18 @@ for gsim_id, info in stations.items():
     if len(merged) == 0:
         continue
 
-    output = merged[['date', 'year', 'month', 'MEAN', 'final_streamflow', 'fill_method', 'quality_flag']]
+    output = merged[
+        [
+            'date',
+            'year',
+            'month',
+            'MEAN',
+            'final_streamflow',
+            'segment_length',
+            'fill_method',
+            'quality_flag',
+        ]
+    ]
     output = output.rename(columns={'MEAN': 'grdc_observed', 'final_streamflow': 'gsim_filled'})
     output.to_csv(csv_file, index=False)
 

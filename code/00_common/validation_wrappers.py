@@ -30,11 +30,7 @@ DEFAULT_METHOD_ORDER = [
     "DTRR",
     "LSTM",
 ]
-EXPERIMENTAL_METHODS = [
-    "MAML_Calibrated",
-    "Baseline_Ours",
-]
-METHOD_ORDER = DEFAULT_METHOD_ORDER + EXPERIMENTAL_METHODS
+METHOD_ORDER = DEFAULT_METHOD_ORDER
 
 FOCUS_METHODS = ["MAML", "DTRR", "RandomForest", "IDW"]
 TRAINED_MODEL_METHODS = {
@@ -42,9 +38,9 @@ TRAINED_MODEL_METHODS = {
     "Linear": "linear",
     "KNN": "knn",
     "MAML": "maml",
-    "MAML_Calibrated": "maml",
     "LSTM": "lstm",
 }
+MODEL_CACHE_VERSION = "maml-anchor-gapmeta-nonnegative-20260717"
 MAML_CONFIG = {
     "meta_lr": 0.001,
     "inner_lr": 0.05,
@@ -53,6 +49,8 @@ MAML_CONFIG = {
     "epochs": 60,
     "hidden_dim": 64,
     "input_dim": 3,
+    "first_order": True,
+    "meta_scenarios": ["random30", "block3", "block6", "block12", "block25plus"],
 }
 LSTM_CONFIG = {
     "seq_len": 6,
@@ -62,9 +60,7 @@ LSTM_CONFIG = {
 }
 
 
-METHOD_ALIASES = {
-    "MAML_Ours": "MAML",
-}
+METHOD_ALIASES = {}
 
 
 def load_anchor_data(station_ids):
@@ -151,6 +147,7 @@ def _anchor_signature(anchor_data):
 
 def _cache_key(anchor_data, similarity_df):
     digest = hashlib.sha256()
+    digest.update(MODEL_CACHE_VERSION.encode("utf-8"))
     digest.update(_anchor_signature(anchor_data).encode("utf-8"))
     digest.update(_similarity_signature(similarity_df).encode("utf-8"))
     digest.update(json.dumps(MAML_CONFIG, sort_keys=True).encode("utf-8"))
@@ -187,6 +184,7 @@ def _has_complete_cache(paths, required_model_types):
 def _save_manifest(paths, cache_key, anchor_data, similarity_df):
     manifest = {
         "cache_key": cache_key,
+        "model_cache_version": MODEL_CACHE_VERSION,
         "random_seed": RANDOM_SEED,
         "n_anchor_stations": len(anchor_data),
         "n_similarity_rows": int(len(similarity_df)),
@@ -364,8 +362,6 @@ def run_all_methods(anchor_data, validation_set, similarity_df, models, method_n
     for method_name in selected_methods:
         if method_name == "IDW":
             predictions.append(core.method_idw(anchor_data, validation_set, similarity_df))
-        elif method_name == "Baseline_Ours":
-            predictions.append(core.method_baseline(anchor_data, validation_set, similarity_df))
         elif method_name == "SeasonalMean":
             predictions.append(core.method_seasonal(anchor_data, validation_set, similarity_df))
         elif method_name == "RandomForest":
@@ -378,8 +374,6 @@ def run_all_methods(anchor_data, validation_set, similarity_df, models, method_n
             predictions.append(core.method_maml(anchor_data, validation_set, similarity_df, trained_model=models["maml"]))
         elif method_name == "DTRR":
             predictions.append(core.method_dtrr(anchor_data, validation_set, similarity_df))
-        elif method_name == "MAML_Calibrated":
-            predictions.append(core.method_maml_calibrated(anchor_data, validation_set, similarity_df, trained_model=models["maml"]))
         elif method_name == "LSTM":
             predictions.append(core.method_lstm(anchor_data, validation_set, trained_model=models["lstm"]))
     results, common_keys = core.evaluate_on_common_points(predictions, selected_methods)
@@ -441,7 +435,6 @@ def plot_scatter_panel(scenario_outputs, scenario_names, output_file):
         "SeasonalMean": "#8fb339",
         "MAML": "#c8553d",
         "DTRR": "#d1495b",
-        "MAML_Calibrated": "#b56576",
         "RandomForest": "#264653",
         "IDW": "#457b9d",
     }

@@ -120,7 +120,7 @@ for idx, (station_id, region_label) in enumerate(STATIONS):
 legend_elements = [
     plt.Line2D([0], [0], color="#333333", lw=1.0, label="Observed"),
     plt.Line2D([0], [0], color="#0072B2", lw=1.0, ls="--", marker="o",
-               markersize=3, label="SGML-filled"),
+               markersize=3, label="GSIM-PLUS filled"),
     Patch(facecolor="#56B4E950", label="Q1 (≤ 3 months)"),
     Patch(facecolor="#E69F0050", label="Q2 (4–24 months)"),
     Patch(facecolor="#CC79A750", label="Q3 (> 24 months)"),

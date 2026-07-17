@@ -10,6 +10,8 @@ This document summarises the full GSIM-PLUS computational pipeline included unde
 - Primary quality layer: `quality_flag`, `segment_length`, and `fill_method`
 - Contextual risk layer: climate class, arid-basin flag, low-flow flag, combined context flag, and safeguard activation
 
+`MAML` denotes Model-Agnostic Meta-Learning. The released implementation learns a first-order meta-initialization from anchor stations using balanced simulated random and continuous gaps (random 30 %, 3, 6, 12, and 25-48 months). Each query gap is predicted recursively during meta-training, and support-only standardization prevents hidden query values from entering preprocessing. At a target station, the model is adapted using matched-anchor observations and available target observations before recursive reconstruction. All reconstructed flows are constrained to be nonnegative before recursive feedback. Its role as the low-flow safeguard is based on empirical stability rather than on removal of lag-1 recursion.
+
 ## Input configuration
 
 The large external inputs are not distributed with this repository. Configure the workflow using:
@@ -77,7 +79,7 @@ If `GSIM_PLUS_PROJECT_DIR` is not set, the repository root is used as the workin
 - `code/00_common/gsim_plus_utils.py`
   - Shared data access and helper utilities.
 - `code/00_common/gsim_core.py`
-  - Core model implementations and DTRR logic.
+  - Core DTRR and gap-aware MAML implementations.
 - `code/00_common/validation_wrappers.py`
   - Method registration and evaluation wrappers.
 

@@ -1,15 +1,12 @@
 ﻿import argparse
 import json
 import sys
-import copy
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
-import torch.optim as optim
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMON = ROOT / "00_common"
@@ -37,26 +34,6 @@ HYBRID_SCHEMES = {
         "Q2": "DTRR",
         "Q3": "DTRR",
     },
-    "maml_calibrated_only": {
-        "Q1": "MAML_Calibrated",
-        "Q2": "MAML_Calibrated",
-        "Q3": "MAML_Calibrated",
-    },
-    "hybrid_v1": {
-        "Q1": "RandomForest",
-        "Q2": "Linear",
-        "Q3": "MAML",
-    },
-    "hybrid_v2": {
-        "Q1": "Linear",
-        "Q2": "MAML",
-        "Q3": "MAML",
-    },
-}
-SKLEARN_MODEL_TYPES = {
-    "RandomForest": "rf",
-    "Linear": "linear",
-    "KNN": "knn",
 }
 LOW_FLOW_MEDIAN_THRESHOLD = 0.02
 
@@ -147,42 +124,23 @@ def build_target_base_data(station_id):
     }
 
 
-def recursive_predict_with_sklearn_product(model, val_data):
-    predictions = {}
-    std_series = val_data["std_series_init"].copy()
-    for idx in val_data["hide_indices"]:
-        x_row = core.build_feature_row(val_data, std_series, idx).reshape(1, -1)
-        pred_std = float(model.predict(x_row)[0])
-        pred_orig = float(core.from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
-        if np.isfinite(pred_orig):
-            predictions[(val_data["station_id"], int(idx))] = {"pred": pred_orig}
-            std_series[idx] = pred_std
-    return predictions
-
-
-def recursive_predict_with_maml_product(model, val_data, device, calibration=None):
+def recursive_predict_with_maml_product(model, val_data, device):
     predictions = {}
     std_series = val_data["std_series_init"].copy()
     with torch.no_grad():
         for idx in val_data["hide_indices"]:
             x_row = core.build_feature_row(val_data, std_series, idx)
             pred_std = float(model(torch.FloatTensor(x_row).unsqueeze(0).to(device)).cpu().numpy()[0, 0])
-            pred_std = core.apply_linear_calibration(pred_std, calibration)
-            pred_orig = float(core.from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+            pred_std, pred_orig = core.constrain_nonnegative_prediction(
+                pred_std, val_data["flow_mean"], val_data["flow_std"]
+            )
             if np.isfinite(pred_orig):
                 predictions[(val_data["station_id"], int(idx))] = {"pred": pred_orig}
                 std_series[idx] = pred_std
     return predictions
 
 
-def method_ml_product(validation_set, trained_model):
-    predictions = {}
-    for val_data in validation_set.values():
-        predictions.update(recursive_predict_with_sklearn_product(trained_model, val_data))
-    return predictions
-
-
-def method_maml_product(anchor_data, validation_set, similarity_df, trained_model, calibrated=False):
+def method_maml_product(anchor_data, validation_set, similarity_df, trained_model):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     maml_config = {
         "inner_lr": 0.05,
@@ -209,8 +167,7 @@ def method_maml_product(anchor_data, validation_set, similarity_df, trained_mode
         )
         if adapted_model is None:
             continue
-        calibration = core.fit_maml_station_calibration(adapted_model, val_data, device) if calibrated else None
-        predictions.update(recursive_predict_with_maml_product(adapted_model, val_data, device, calibration))
+        predictions.update(recursive_predict_with_maml_product(adapted_model, val_data, device))
 
     return predictions
 
@@ -228,7 +185,9 @@ def recursive_predict_with_dtrr_product(model, anchor_data, target_task_list, va
             std_series,
             idx,
         )
-        pred_orig = float(core.from_std(pred_std, val_data["flow_mean"], val_data["flow_std"]))
+        pred_std, pred_orig = core.constrain_nonnegative_prediction(
+            pred_std, val_data["flow_mean"], val_data["flow_std"]
+        )
         if np.isfinite(pred_orig):
             predictions[(val_data["station_id"], int(idx))] = {"pred": pred_orig}
             std_series[idx] = pred_std
@@ -260,23 +219,16 @@ def get_scheme_predictions(station_id, entry, anchor_data, similarity_df, models
             predictions_by_method[method_name] = method_dtrr_product(anchor_data, validation_set, similarity_df)
             continue
 
-        if method_name in {"MAML", "MAML_Calibrated"}:
+        if method_name == "MAML":
             predictions_by_method[method_name] = method_maml_product(
                 anchor_data,
                 validation_set,
                 similarity_df,
                 trained_model=models["maml"],
-                calibrated=(method_name == "MAML_Calibrated"),
             )
             continue
 
-        model_type = SKLEARN_MODEL_TYPES.get(method_name)
-        if model_type is None:
-            raise ValueError(f"Unsupported product method: {method_name}")
-        predictions_by_method[method_name] = method_ml_product(
-            validation_set,
-            trained_model=models[model_type],
-        )
+        raise ValueError(f"Unsupported product method: {method_name}")
 
     return predictions_by_method
 
@@ -412,7 +364,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Build GSIM-PLUS product with single or hybrid imputation schemes.")
     parser.add_argument(
         "--scheme",
-        choices=["maml_only", "dtrr_only", "dtrr_guarded", "maml_calibrated_only", "hybrid_v1", "hybrid_v2", "all"],
+        choices=["maml_only", "dtrr_only", "dtrr_guarded", "all"],
         default="dtrr_guarded",
         help="Imputation scheme to run. 'all' generates all configured schemes.",
     )
@@ -483,7 +435,8 @@ def run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df
                         index=False,
                     )
                     infilled_written = True
-        except Exception:
+        except Exception as exc:
+            print(f"  [{scheme_name}] ERROR {station_id}: {exc}")
             summaries.append({"station_id": station_id, "filled_points": 0, "status": "error"})
 
     summary_df = pd.DataFrame(summaries)
@@ -498,6 +451,7 @@ def run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df
         "study_period": f"{STUDY_START_YEAR}-{STUDY_END_YEAR}",
         "production_method": production_method_label(scheme_rules) + (" + low_flow_guard" if guard_low_flow else ""),
         "low_flow_guard_threshold_m3s": LOW_FLOW_MEDIAN_THRESHOLD if guard_low_flow else None,
+        "nonnegative_prediction_constraint": True,
         "contextual_risk_fields": [
             "kg_major",
             "kg_code",

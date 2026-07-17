@@ -16,8 +16,6 @@ The GSIM-PLUS workflow consists of three connected components:
 2. Similarity-based donor identification using weighted hydro-climatic, topographic, spatial, and soil descriptors.
 3. Monthly gap filling using **DTRR**, with `MAML` retained only as a low-flow fallback in the guarded production scheme.
 
-The public method name is now **DTRR**. Earlier internal labels have been retired and are no longer used as release terminology in this code archive.
-
 ---
 
 ## Key Numbers
@@ -33,6 +31,8 @@ The public method name is now **DTRR**. Earlier internal labels have been retire
 | Similarity neighbours (K) | 5 |
 | Catchment similarity features | 17 |
 | Low-flow safeguard | median flow < 0.02 m3 s-1 |
+| Target safeguard output | 676 stations; 33,542 MAML-filled months |
+| Anchor safeguard output | 212 stations; 1,823 MAML-filled months |
 | Final production label | `DTRR + low_flow_guard` |
 
 ---
@@ -61,55 +61,66 @@ The default group weights are:
 
 ### DTRR Gap Filling
 
-The primary production method is **DTRR**. In the guarded production workflow, stations with median flow below 0.02 m3 s-1 are automatically routed to `MAML` to avoid instability in recursive prediction. This cutoff is a pragmatic production safeguard rather than a theoretically unique threshold. As a result:
+The primary production method is **DTRR**. In the guarded production workflow, stations with median flow below 0.02 m3 s-1 are automatically routed to `MAML` to avoid the numerical divergence observed for DTRR in very-low-flow stress tests. This cutoff is a pragmatic production safeguard rather than a theoretically unique threshold. As a result:
 
 - `DTRR` is the default and dominant fill method.
 - `MAML` appears only as a fallback for low-flow stations.
+
+Both production paths enforce the physical boundary `streamflow >= 0` before a reconstructed value is written back as recursive lag-1 input.
+
+This constraint applies only to reconstructed values. Rows labelled `Q0` preserve the source GSIM observations unchanged, including any source-data anomalies.
+
+### MAML Low-Flow Safeguard
+
+**Model-Agnostic Meta-Learning (MAML)** is implemented as a neural regression model with seasonal terms and lag-1 target flow as inputs. Its meta-initialization is learned exclusively from anchor stations. During meta-training, random 30 % gaps and continuous gaps of 3, 6, 12, and 25-48 months are simulated at anchor stations. The remaining observations form the support set, while the hidden months form a recursively predicted query set. Station-specific standardization is calculated from support observations only.
+
+For application to a target station, the learned initialization is adapted using observations from its matched anchor stations and its own available record. Missing months are then reconstructed sequentially, with each prediction available as the lag-1 input for the next missing month. All reconstructed flows are constrained to be nonnegative before recursive feedback. MAML is therefore also recursive; its use as the safeguard is supported by its empirical numerical stability and by its consistently highest NSE among the non-DTRR methods across the evaluated validation scenarios.
 
 ---
 
 ## Validation Summary
 
-The latest workflow outputs show that DTRR is consistently the best-performing method among the tested baselines across random masking, continuous gaps, and super-long-gap reconstruction.
+Validation results show that DTRR provides the highest general performance, while MAML has the highest NSE among the non-DTRR methods in every evaluated scenario and remains numerically stable in the very-low-flow settings where guarded fallback is required.
 
 ### Random 30 % Validation
 
-Source: `04_Random_30pct_Validation/random_30pct_summary.csv`
+Source: `results/final_validation_summary.csv` (`scenario = random_30pct`)
 
 | Method | NSE | KGE |
 |---|---:|---:|
-| **DTRR** | **0.8646** | **0.9195** |
+| **DTRR** | **0.8642** | **0.9197** |
+| MAML | 0.8080 | 0.8611 |
 | Random Forest | 0.7631 | 0.8287 |
-| MAML | 0.7606 | 0.8007 |
 | Linear | 0.7467 | 0.8092 |
 
 ### Continuous Gap Validation
 
-Source: `05_Continuous_Gap_Validation/continuous_gap_summary.csv`
+Source: `results/final_validation_summary.csv` (`scenario = 3_months, 6_months, 12_months`)
 
-| Gap length | DTRR NSE | DTRR KGE |
-|---|---:|---:|
-| 3 months | 0.8788 | 0.8646 |
-| 6 months | 0.9292 | 0.9318 |
-| 12 months | 0.7954 | 0.8689 |
+| Gap length | DTRR NSE | DTRR KGE | MAML NSE | MAML KGE |
+|---|---:|---:|---:|---:|
+| 3 months | 0.8794 | 0.8652 | 0.7854 | 0.8117 |
+| 6 months | 0.9295 | 0.9308 | 0.7469 | 0.8545 |
+| 12 months | 0.7975 | 0.8690 | 0.6257 | 0.7314 |
 
 ### Hybrid Validation
 
-Source: `06_Hybrid_Validation/hybrid_h123_summary_excluding_abnormal.csv`
+Source: `results/final_validation_summary.csv` (the excluded-station rows for H2 and H3)
 
-| Scenario | DTRR NSE | DTRR KGE |
-|---|---:|---:|
-| H2 balanced mixed | 0.8089 | 0.8827 |
-| H3 long-gap dominant | 0.6910 | 0.8189 |
+| Scenario | DTRR NSE | DTRR KGE | MAML NSE | MAML KGE |
+|---|---:|---:|---:|---:|
+| H1 short-gap dominant | 0.7738 | 0.8614 | 0.7246 | 0.7932 |
+| H2 balanced mixed | 0.8090 | 0.8806 | 0.6976 | 0.7798 |
+| H3 long-gap dominant | 0.7290 | 0.8239 | 0.6463 | 0.7527 |
 
 ### Super-Long Gap Validation
 
-Source: `07_SuperLong_Gap_Analysis/super_long_summary_excluding_abnormal.csv`
+Source: `results/final_validation_summary.csv` (the row excluding `AU_0000492`, `AU_0002125`, and `BR_0000375`)
 
 | Method | NSE | KGE |
 |---|---:|---:|
-| **DTRR** | **0.5109** | **0.7185** |
-| MAML | 0.2808 | 0.5976 |
+| **DTRR** | **0.5109** | **0.7153** |
+| MAML | 0.2862 | 0.6073 |
 | Linear | 0.2284 | 0.5855 |
 | LSTM | 0.2510 | 0.5946 |
 
@@ -130,7 +141,7 @@ This directory contains the full computational workflow used for GSIM-PLUS gener
 - `06_Hybrid_Validation/`
 - `07_SuperLong_Gap_Analysis/`
 - `08_GSIM_PLUS_Product/`
-- `09 GRDC.../` for GRDC-oriented external validation
+- `09 GRDC.../` for comparison against independent GRDC observations
 - `run_all_steps.py`
 - `analyze_gsim_distribution.py`
 
@@ -144,7 +155,7 @@ This directory contains the plotting and manuscript-side statistics scripts used
 - super-long-gap analysis figures
 - product-quality and timeseries figures
 - Koppen climate-zone summary scripts
-- GRDC independent-validation figure scripts
+- GRDC independent-reference comparison figure scripts
 
 ---
 
@@ -213,6 +224,12 @@ Run the final production scripts directly:
 ```bash
 python code/08_GSIM_PLUS_Product/08_build_gsim_plus_dataset.py
 python code/08_GSIM_PLUS_Product/08_build_gsim_plus_anchor_dataset.py
+```
+
+Run the MAML regression tests:
+
+```bash
+python code/tests/test_maml_training.py
 ```
 
 The guarded DTRR workflow, the 0.02 m3 s-1 safeguard, and the contextual risk fields are the default configuration in both production scripts.
