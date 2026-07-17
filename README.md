@@ -24,7 +24,7 @@ The public method name is now **DTRR**. Earlier internal labels have been retire
 
 | Item | Value |
 |---|---|
-| Total GSIM stations analysed | 30,960 |
+| Total GSIM stations analysed | 30,959 |
 | Anchor stations | 7,323 |
 | Target stations | 8,731 |
 | Study period | 1995-01 to 2015-12 (252 months) |
@@ -32,6 +32,7 @@ The public method name is now **DTRR**. Earlier internal labels have been retire
 | Anchor infilled monthly records | 25,542 |
 | Similarity neighbours (K) | 5 |
 | Catchment similarity features | 17 |
+| Low-flow safeguard | median flow < 0.02 m3 s-1 |
 | Final production label | `DTRR + low_flow_guard` |
 
 ---
@@ -60,7 +61,7 @@ The default group weights are:
 
 ### DTRR Gap Filling
 
-The primary production method is **DTRR**. In the guarded production workflow, stations with very low median flow are automatically routed to `MAML` to avoid instability in recursive prediction. As a result:
+The primary production method is **DTRR**. In the guarded production workflow, stations with median flow below 0.02 m3 s-1 are automatically routed to `MAML` to avoid instability in recursive prediction. This cutoff is a pragmatic production safeguard rather than a theoretically unique threshold. As a result:
 
 - `DTRR` is the default and dominant fill method.
 - `MAML` appears only as a fallback for low-flow stations.
@@ -167,6 +168,11 @@ Each station CSV contains:
 | `segment_length` | Length of the gap segment |
 | `fill_method` | `OBSERVED`, `DTRR`, or `MAML` |
 | `quality_flag` | `Q0`, `Q1`, `Q2`, `Q3`, or `Q4` |
+| `kg_major`, `kg_code` | Koppen-Geiger climate context |
+| `arid_flag` | Whether the station is in the major arid climate class |
+| `low_flow_flag` | Whether station median flow is below 0.02 m3 s-1 |
+| `context_risk_flag` | Combined `ARID` and/or `LOW_FLOW` context tag |
+| `guard_applied` | Whether the MAML low-flow safeguard was activated |
 
 Quality flags represent:
 
@@ -182,10 +188,24 @@ Quality flags represent:
 
 ## Running the Workflow
 
+The raw GSIM records and large external geospatial and climate inputs are not included. Configure their locations before running the workflow. The main supported environment variables are:
+
+- `GSIM_PLUS_PROJECT_DIR`: working directory for intermediate and final outputs.
+- `GSIM_MONTHLY_DIR`: directory containing the GSIM monthly station files.
+- `GSIM_PLUS_MATERIAL_DIR`: directory containing attributes, climate inputs, and geospatial material.
+
+For example, in PowerShell:
+
+```powershell
+$env:GSIM_PLUS_PROJECT_DIR = "D:\\path\\to\\gsim-plus-workspace"
+$env:GSIM_MONTHLY_DIR = "D:\\path\\to\\GSIM_indices\\TIMESERIES\\monthly"
+$env:GSIM_PLUS_MATERIAL_DIR = "D:\\path\\to\\gsim-plus-materials"
+```
+
 Run the full pipeline:
 
 ```bash
-python run_all_steps.py
+python code/run_all_steps.py
 ```
 
 Run the final production scripts directly:
@@ -195,7 +215,7 @@ python code/08_GSIM_PLUS_Product/08_build_gsim_plus_dataset.py
 python code/08_GSIM_PLUS_Product/08_build_gsim_plus_anchor_dataset.py
 ```
 
-The guarded DTRR workflow is now the default configuration in both production scripts.
+The guarded DTRR workflow, the 0.02 m3 s-1 safeguard, and the contextual risk fields are the default configuration in both production scripts.
 
 ---
 

@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import copy
 import json
 import sys
@@ -61,7 +61,7 @@ FEATURE_PRIORS = {
 }
 
 HYDRO_LOG_COLS = {"mean_flow_m3s", "upstream_area_km2", "area_local_hybas_km2"}
-LOW_FLOW_MEDIAN_THRESHOLD = 0.01
+LOW_FLOW_MEDIAN_THRESHOLD = 0.02
 
 
 def cdist(XA, XB):
@@ -85,6 +85,42 @@ def build_segments(indices):
         prev = value
     segments.append((start, prev))
     return segments
+
+
+def load_station_context_map():
+    candidates = [
+        STEP8_DIR / "station_features_with_meteo.csv",
+        STEP2_DIR / "station_features_with_meteo.csv",
+        STEP2_DIR / "station_features.csv",
+    ]
+    for path in candidates:
+        if path.exists():
+            df = pd.read_csv(path)
+            keep = [c for c in ["station_id", "kg_major", "kg_code"] if c in df.columns]
+            if "station_id" in keep:
+                return df[keep].drop_duplicates(subset=["station_id"]).set_index("station_id").to_dict("index")
+    return {}
+
+
+def build_context_fields(station_id, median_flow, station_context_map, guard_applied=False):
+    ctx = station_context_map.get(station_id, {})
+    kg_major = str(ctx.get("kg_major", "") if pd.notna(ctx.get("kg_major", "")) else "")
+    kg_code = str(ctx.get("kg_code", "") if pd.notna(ctx.get("kg_code", "")) else "")
+    arid_flag = bool(kg_major == "B")
+    low_flow_flag = bool(np.isfinite(median_flow) and median_flow < LOW_FLOW_MEDIAN_THRESHOLD)
+    tags = []
+    if arid_flag:
+        tags.append("ARID")
+    if low_flow_flag:
+        tags.append("LOW_FLOW")
+    return {
+        "kg_major": kg_major,
+        "kg_code": kg_code,
+        "arid_flag": arid_flag,
+        "low_flow_flag": low_flow_flag,
+        "context_risk_flag": "+".join(tags) if tags else "NONE",
+        "guard_applied": bool(guard_applied),
+    }
 
 
 def choose_rule(seg_len):
@@ -330,10 +366,12 @@ def method_product(anchor_data, validation_set, similarity_df, model_obj, method
     )
 
 
-def fill_anchor_station(station_id, anchor_data, similarity_df, model_obj, method_name):
+def fill_anchor_station(station_id, anchor_data, similarity_df, model_obj, method_name, station_context_map):
     base_data = build_station_base_data(station_id)
+    median_flow = station_median_flow(base_data)
     missing_indices = np.where(~base_data["valid"])[0]
     if len(missing_indices) == 0:
+        context_fields = build_context_fields(station_id, median_flow, station_context_map, guard_applied=False)
         rows = []
         for idx, date_val in enumerate(pd.to_datetime(base_data["dates"])):
             rows.append(
@@ -347,19 +385,35 @@ def fill_anchor_station(station_id, anchor_data, similarity_df, model_obj, metho
                     "segment_length": 0,
                     "fill_method": "OBSERVED",
                     "quality_flag": "Q0",
+                    **context_fields,
                 }
             )
-        return pd.DataFrame(rows), {"station_id": station_id, "filled_points": 0, "status": "no_missing"}
+        return pd.DataFrame(rows), {
+            "station_id": station_id,
+            "filled_points": 0,
+            "status": "no_missing",
+            "median_flow": median_flow,
+            **context_fields,
+        }
 
     entry = core.build_validation_entry(station_id, base_data, missing_indices)
     if entry is None:
-        return None, {"station_id": station_id, "filled_points": 0, "status": "insufficient_training"}
+        context_fields = build_context_fields(station_id, median_flow, station_context_map, guard_applied=False)
+        return None, {
+            "station_id": station_id,
+            "filled_points": 0,
+            "status": "insufficient_training",
+            "median_flow": median_flow,
+            **context_fields,
+        }
 
     effective_method = "DTRR" if method_name == "DTRR_Guarded" else method_name
+    guard_applied = False
     if method_name == "DTRR_Guarded":
-        median_flow = station_median_flow(base_data)
         if np.isfinite(median_flow) and median_flow < LOW_FLOW_MEDIAN_THRESHOLD:
             effective_method = "MAML"
+            guard_applied = True
+    context_fields = build_context_fields(station_id, median_flow, station_context_map, guard_applied=guard_applied)
 
     validation_set = {station_id: entry}
     pred_maml = method_product(anchor_data, validation_set, similarity_df, model_obj, effective_method)
@@ -387,6 +441,8 @@ def fill_anchor_station(station_id, anchor_data, similarity_df, model_obj, metho
         "filled_points": filled_count,
         "missing_points": int(len(missing_indices)),
         "status": "filled",
+        "median_flow": median_flow,
+        **context_fields,
     }
 
     rows = []
@@ -404,6 +460,7 @@ def fill_anchor_station(station_id, anchor_data, similarity_df, model_obj, metho
                     "segment_length": 0,
                     "fill_method": "OBSERVED",
                     "quality_flag": "Q0",
+                    **context_fields,
                 }
             )
         else:
@@ -422,6 +479,7 @@ def fill_anchor_station(station_id, anchor_data, similarity_df, model_obj, metho
                     "segment_length": item["segment_length"],
                     "fill_method": item["fill_method"],
                     "quality_flag": item["quality_flag"],
+                    **context_fields,
                 }
             )
     return pd.DataFrame(rows), summary
@@ -449,6 +507,7 @@ def anchor_output_dir(method_name):
 def main():
     args = parse_args()
     anchor_ids = pd.read_csv(STEP1_DIR / "anchor_stations.csv")["station_id"].tolist()
+    station_context_map = load_station_context_map()
 
     print("Building anchor-to-anchor similarity table...")
     anchor_similarity_df, weights_df = build_anchor_to_anchor_topk()
@@ -503,7 +562,7 @@ def main():
         if i % 500 == 0:
             print(f"  Processed {i}/{len(anchor_ids)} anchor stations...")
         try:
-            station_df, summary = fill_anchor_station(station_id, anchor_data, anchor_similarity_df, model_obj, args.method)
+            station_df, summary = fill_anchor_station(station_id, anchor_data, anchor_similarity_df, model_obj, args.method, station_context_map)
             summaries.append(summary)
             if station_df is not None:
                 station_df.to_csv(anchor_fill_dir / f"{station_id}.csv", index=False)
@@ -532,6 +591,15 @@ def main():
         "n_filled_points": int(total_filled_points),
         "study_period": f"{STUDY_START_YEAR}-{STUDY_END_YEAR}",
         "production_method": "DTRR + low_flow_guard" if args.method == "DTRR_Guarded" else args.method,
+        "low_flow_guard_threshold_m3s": LOW_FLOW_MEDIAN_THRESHOLD if args.method == "DTRR_Guarded" else None,
+        "contextual_risk_fields": [
+            "kg_major",
+            "kg_code",
+            "arid_flag",
+            "low_flow_flag",
+            "context_risk_flag",
+            "guard_applied",
+        ],
         "station_split_dir": str(anchor_fill_dir),
         "similarity_file": str(anchor_similarity_path),
     }
@@ -544,4 +612,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

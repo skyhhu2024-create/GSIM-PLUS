@@ -6,7 +6,19 @@ This document summarises the full GSIM-PLUS computational pipeline included unde
 
 - Primary production method: `DTRR`
 - Guarded production scheme: `DTRR + low_flow_guard`
-- Fallback method for very low-flow stations: `MAML`
+- Fallback method for stations with median flow < 0.02 m3 s-1: `MAML`
+- Primary quality layer: `quality_flag`, `segment_length`, and `fill_method`
+- Contextual risk layer: climate class, arid-basin flag, low-flow flag, combined context flag, and safeguard activation
+
+## Input configuration
+
+The large external inputs are not distributed with this repository. Configure the workflow using:
+
+- `GSIM_PLUS_PROJECT_DIR` for intermediate and output files.
+- `GSIM_MONTHLY_DIR` for the GSIM monthly station records.
+- `GSIM_PLUS_MATERIAL_DIR` for station attributes, climate inputs, and geospatial material.
+
+If `GSIM_PLUS_PROJECT_DIR` is not set, the repository root is used as the working directory.
 
 ## Code layout
 
@@ -54,9 +66,9 @@ This document summarises the full GSIM-PLUS computational pipeline included unde
 9. `07_SuperLong_Gap_Analysis/07_super_long_gap_analysis.py`
    - Evaluates method robustness on super-long gaps.
 10. `08_GSIM_PLUS_Product/08_build_gsim_plus_dataset.py`
-    - Builds the final target-station GSIM-PLUS product.
+    - Builds the final target-station GSIM-PLUS product with the 0.02 m3 s-1 safeguard and contextual risk fields.
 11. `08_GSIM_PLUS_Product/08_build_gsim_plus_anchor_dataset.py`
-    - Builds the anchor companion product.
+    - Builds the anchor companion product under the same quality design.
 
 ## Supporting modules
 
@@ -78,6 +90,8 @@ The `code/09 GRDC_CrossValidation/` directory stores the scripts used for GRDC-o
 - GRDC matching-table generation
 - GRDC validation execution
 - four-station comparison utilities
+
+The regional GRDC scripts require external observations and station shapefiles that are not redistributed here. Their locations can be supplied with `GSIM_PLUS_USA_GRDC_DIR`, `GSIM_PLUS_EU_GRDC_DIR`, `GSIM_PLUS_USA_GRDC_SHP`, `GSIM_PLUS_USA_GSIM_SHP`, `GSIM_PLUS_EU_GRDC_SHP`, and `GSIM_PLUS_EU_GSIM_SHP`.
 
 ## Figure scripts
 

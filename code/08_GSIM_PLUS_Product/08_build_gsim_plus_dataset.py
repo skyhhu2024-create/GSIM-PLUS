@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import json
 import sys
 import copy
@@ -16,7 +16,7 @@ COMMON = ROOT / "00_common"
 if str(COMMON) not in sys.path:
     sys.path.insert(0, str(COMMON))
 
-from gsim_plus_config import STEP1_DIR, STEP3_DIR, STEP8_DIR, STUDY_END_YEAR, STUDY_START_YEAR
+from gsim_plus_config import STEP1_DIR, STEP2_DIR, STEP3_DIR, STEP8_DIR, STUDY_END_YEAR, STUDY_START_YEAR
 from gsim_plus_utils import read_station_study_period
 from validation_wrappers import core, load_anchor_data, train_reusable_models
 
@@ -58,7 +58,43 @@ SKLEARN_MODEL_TYPES = {
     "Linear": "linear",
     "KNN": "knn",
 }
-LOW_FLOW_MEDIAN_THRESHOLD = 0.01
+LOW_FLOW_MEDIAN_THRESHOLD = 0.02
+
+
+def load_station_context_map():
+    candidates = [
+        STEP8_DIR / "station_features_with_meteo.csv",
+        STEP2_DIR / "station_features_with_meteo.csv",
+        STEP2_DIR / "station_features.csv",
+    ]
+    for path in candidates:
+        if path.exists():
+            df = pd.read_csv(path)
+            keep = [c for c in ["station_id", "kg_major", "kg_code"] if c in df.columns]
+            if "station_id" in keep:
+                return df[keep].drop_duplicates(subset=["station_id"]).set_index("station_id").to_dict("index")
+    return {}
+
+
+def build_context_fields(station_id, median_flow, station_context_map, guard_applied=False):
+    ctx = station_context_map.get(station_id, {})
+    kg_major = str(ctx.get("kg_major", "") if pd.notna(ctx.get("kg_major", "")) else "")
+    kg_code = str(ctx.get("kg_code", "") if pd.notna(ctx.get("kg_code", "")) else "")
+    arid_flag = bool(kg_major == "B")
+    low_flow_flag = bool(np.isfinite(median_flow) and median_flow < LOW_FLOW_MEDIAN_THRESHOLD)
+    tags = []
+    if arid_flag:
+        tags.append("ARID")
+    if low_flow_flag:
+        tags.append("LOW_FLOW")
+    return {
+        "kg_major": kg_major,
+        "kg_code": kg_code,
+        "arid_flag": arid_flag,
+        "low_flow_flag": low_flow_flag,
+        "context_risk_flag": "+".join(tags) if tags else "NONE",
+        "guard_applied": bool(guard_applied),
+    }
 
 
 def build_segments(indices):
@@ -247,17 +283,19 @@ def get_scheme_predictions(station_id, entry, anchor_data, similarity_df, models
 
 def apply_low_flow_guard(scheme_rules, base_data, guard_low_flow=False):
     if not guard_low_flow:
-        return dict(scheme_rules)
+        return dict(scheme_rules), False
     median_flow = station_median_flow(base_data)
     if np.isfinite(median_flow) and median_flow < LOW_FLOW_MEDIAN_THRESHOLD:
-        return {flag: ("MAML" if method == "DTRR" else method) for flag, method in scheme_rules.items()}
-    return dict(scheme_rules)
+        return {flag: ("MAML" if method == "DTRR" else method) for flag, method in scheme_rules.items()}, True
+    return dict(scheme_rules), False
 
 
-def fill_station(station_id, anchor_data, similarity_df, models, scheme_rules, guard_low_flow=False):
+def fill_station(station_id, anchor_data, similarity_df, models, scheme_rules, station_context_map, guard_low_flow=False):
     base_data = build_target_base_data(station_id)
+    median_flow = station_median_flow(base_data)
     missing_indices = np.where(~base_data["valid"])[0]
     if len(missing_indices) == 0:
+        context_fields = build_context_fields(station_id, median_flow, station_context_map, guard_applied=False)
         full_rows = []
         for idx, date_val in enumerate(pd.to_datetime(base_data["dates"])):
             full_rows.append(
@@ -271,15 +309,30 @@ def fill_station(station_id, anchor_data, similarity_df, models, scheme_rules, g
                     "segment_length": 0,
                     "fill_method": "OBSERVED",
                     "quality_flag": "Q0",
+                    **context_fields,
                 }
             )
-        return pd.DataFrame(full_rows), {"station_id": station_id, "filled_points": 0, "status": "no_missing"}
+        return pd.DataFrame(full_rows), {
+            "station_id": station_id,
+            "filled_points": 0,
+            "status": "no_missing",
+            "median_flow": median_flow,
+            **context_fields,
+        }
 
     entry = core.build_validation_entry(station_id, base_data, missing_indices)
     if entry is None:
-        return None, {"station_id": station_id, "filled_points": 0, "status": "insufficient_training"}
+        context_fields = build_context_fields(station_id, median_flow, station_context_map, guard_applied=False)
+        return None, {
+            "station_id": station_id,
+            "filled_points": 0,
+            "status": "insufficient_training",
+            "median_flow": median_flow,
+            **context_fields,
+        }
 
-    effective_scheme_rules = apply_low_flow_guard(scheme_rules, base_data, guard_low_flow=guard_low_flow)
+    effective_scheme_rules, guard_applied = apply_low_flow_guard(scheme_rules, base_data, guard_low_flow=guard_low_flow)
+    context_fields = build_context_fields(station_id, median_flow, station_context_map, guard_applied=guard_applied)
     predictions_by_method = get_scheme_predictions(
         station_id,
         entry,
@@ -315,6 +368,8 @@ def fill_station(station_id, anchor_data, similarity_df, models, scheme_rules, g
         "filled_points": filled_count,
         "missing_points": int(len(missing_indices)),
         "status": "filled",
+        "median_flow": median_flow,
+        **context_fields,
     }
     full_rows = []
     for idx, date_val in enumerate(pd.to_datetime(entry["dates"])):
@@ -331,6 +386,7 @@ def fill_station(station_id, anchor_data, similarity_df, models, scheme_rules, g
                     "segment_length": 0,
                     "fill_method": "OBSERVED",
                     "quality_flag": "Q0",
+                    **context_fields,
                 }
             )
         else:
@@ -346,6 +402,7 @@ def fill_station(station_id, anchor_data, similarity_df, models, scheme_rules, g
                     "segment_length": item["segment_length"],
                     "fill_method": item["fill_method"],
                     "quality_flag": item["quality_flag"],
+                    **context_fields,
                 }
             )
     return pd.DataFrame(full_rows), summary
@@ -375,7 +432,7 @@ def production_method_label(scheme_rules):
     return "Hybrid(" + ", ".join(f"{flag}={scheme_rules[flag]}" for flag in ["Q1", "Q2", "Q3"]) + ")"
 
 
-def run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df, models):
+def run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df, models, station_context_map):
     output_dir = scheme_output_dir(scheme_name)
     output_dir.mkdir(parents=True, exist_ok=True)
     guard_low_flow = scheme_name == "dtrr_guarded"
@@ -405,6 +462,7 @@ def run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df
                 similarity_df,
                 models,
                 scheme_rules,
+                station_context_map,
                 guard_low_flow=guard_low_flow,
             )
             summaries.append(summary)
@@ -439,6 +497,15 @@ def run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df
         "n_filled_points": int(total_filled_points) if full_written else 0,
         "study_period": f"{STUDY_START_YEAR}-{STUDY_END_YEAR}",
         "production_method": production_method_label(scheme_rules) + (" + low_flow_guard" if guard_low_flow else ""),
+        "low_flow_guard_threshold_m3s": LOW_FLOW_MEDIAN_THRESHOLD if guard_low_flow else None,
+        "contextual_risk_fields": [
+            "kg_major",
+            "kg_code",
+            "arid_flag",
+            "low_flow_flag",
+            "context_risk_flag",
+            "guard_applied",
+        ],
         "station_split_dir": str(gsim_fill_dir),
     }
 
@@ -455,6 +522,7 @@ def main():
     anchor_ids = pd.read_csv(STEP1_DIR / "anchor_stations.csv")["station_id"].tolist()
     target_ids = pd.read_csv(STEP1_DIR / "target_stations.csv")["station_id"].tolist()
     similarity_df = pd.read_csv(STEP3_DIR / "top_5_similar_stations.csv")
+    station_context_map = load_station_context_map()
 
     print("Loading anchor data...")
     anchor_data = load_anchor_data(anchor_ids)
@@ -488,7 +556,7 @@ def main():
     all_summaries = []
     for scheme_name, scheme_rules in selected_schemes:
         print(f"Running scheme: {scheme_name} -> {scheme_rules}")
-        all_summaries.append(run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df, models))
+        all_summaries.append(run_scheme(scheme_name, scheme_rules, anchor_data, target_ids, similarity_df, models, station_context_map))
 
     if len(all_summaries) > 1:
         with open(STEP8_DIR / "hybrid_scheme_run_summary.json", "w", encoding="utf-8") as f:

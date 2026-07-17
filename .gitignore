@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+Thumbs.db
+
+# External inputs and generated outputs
+/inputs/
+/999 material/
+/00_common/model_cache/
+/01_Station_Selection/
+/02_Feature_Table/
+/03_Similarity_Matching/
+/04_Random_30pct_Validation/
+/05_Continuous_Gap_Validation/
+/06_Hybrid_Validation/
+/07_SuperLong_Gap_Analysis/
+/08_GSIM_PLUS_Product/
+/111-paper/
